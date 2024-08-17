@@ -21,7 +21,6 @@ const nextConfig = {
       '@emoji-mart/data',
       '@icons-pack/react-simple-icons',
       '@lobehub/ui',
-      'gpt-tokenizer',
       'chroma-js',
       'shiki',
     ],
