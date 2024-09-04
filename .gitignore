@@ -7,7 +7,7 @@
 .vscode
 .history
 .temp
-.env.local
+.env
 venv
 temp
 tmp
