@@ -1,6 +1,7 @@
 import { MESSAGE_CANCEL_FLAT } from '@/const/message';
 import { LOBE_CHAT_OBSERVATION_ID, LOBE_CHAT_TRACE_ID } from '@/const/trace';
 import { ChatErrorType } from '@/types/fetch';
+import { SmoothingParams } from '@/types/llm';
 import {
   ChatMessageError,
   MessageToolCall,
@@ -41,34 +42,37 @@ export interface FetchSSEOptions {
   onErrorHandle?: (error: ChatMessageError) => void;
   onFinish?: OnFinishHandler;
   onMessageHandle?: (chunk: MessageTextChunk | MessageToolCallsChunk) => void;
-  smoothing?: boolean;
+  smoothing?: SmoothingParams | boolean;
 }
 
 const START_ANIMATION_SPEED = 4;
 
 const END_ANIMATION_SPEED = 15;
 
-const createSmoothMessage = (params: { onTextUpdate: (delta: string, text: string) => void }) => {
+const createSmoothMessage = (params: {
+  onTextUpdate: (delta: string, text: string) => void;
+  startSpeed?: number;
+}) => {
+  const { startSpeed = START_ANIMATION_SPEED } = params;
+
   let buffer = '';
   // why use queue: https://shareg.pt/GLBrjpK
   let outputQueue: string[] = [];
-
-  // eslint-disable-next-line no-undef
-  let animationTimeoutId: NodeJS.Timeout | null = null;
   let isAnimationActive = false;
+  let animationFrameId: number | null = null;
 
   // when you need to stop the animation, call this function
   const stopAnimation = () => {
     isAnimationActive = false;
-    if (animationTimeoutId !== null) {
-      clearTimeout(animationTimeoutId);
-      animationTimeoutId = null;
+    if (animationFrameId !== null) {
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = null;
     }
   };
 
   // define startAnimation function to display the text in buffer smooth
   // when you need to start the animation, call this function
-  const startAnimation = (speed = START_ANIMATION_SPEED) =>
+  const startAnimation = (speed = startSpeed) =>
     new Promise<void>((resolve) => {
       if (isAnimationActive) {
         resolve();
@@ -80,32 +84,33 @@ const createSmoothMessage = (params: { onTextUpdate: (delta: string, text: strin
       const updateText = () => {
         // 如果动画已经不再激活，则停止更新文本
         if (!isAnimationActive) {
-          clearTimeout(animationTimeoutId!);
-          animationTimeoutId = null;
+          cancelAnimationFrame(animationFrameId!);
+          animationFrameId = null;
           resolve();
+          return;
         }
 
         // 如果还有文本没有显示
         // 检查队列中是否有字符待显示
         if (outputQueue.length > 0) {
-          // 从队列中获取前两个字符（如果存在）
+          // 从队列中获取前 n 个字符（如果存在）
           const charsToAdd = outputQueue.splice(0, speed).join('');
           buffer += charsToAdd;
 
           // 更新消息内容，这里可能需要结合实际情况调整
           params.onTextUpdate(charsToAdd, buffer);
-
-          // 设置下一个字符的延迟
-          animationTimeoutId = setTimeout(updateText, 16); // 16 毫秒的延迟模拟打字机效果
         } else {
           // 当所有字符都显示完毕时，清除动画状态
           isAnimationActive = false;
-          animationTimeoutId = null;
+          animationFrameId = null;
           resolve();
+          return;
         }
+
+        animationFrameId = requestAnimationFrame(updateText);
       };
 
-      updateText();
+      animationFrameId = requestAnimationFrame(updateText);
     });
 
   const pushToQueue = (text: string) => {
@@ -123,25 +128,26 @@ const createSmoothMessage = (params: { onTextUpdate: (delta: string, text: strin
 
 const createSmoothToolCalls = (params: {
   onToolCallsUpdate: (toolCalls: MessageToolCall[], isAnimationActives: boolean[]) => void;
+  startSpeed?: number;
 }) => {
+  const { startSpeed = START_ANIMATION_SPEED } = params;
   let toolCallsBuffer: MessageToolCall[] = [];
 
   // 为每个 tool_call 维护一个输出队列和动画控制器
 
-  // eslint-disable-next-line no-undef
-  const animationTimeoutIds: (NodeJS.Timeout | null)[] = [];
   const outputQueues: string[][] = [];
   const isAnimationActives: boolean[] = [];
+  const animationFrameIds: (number | null)[] = [];
 
   const stopAnimation = (index: number) => {
     isAnimationActives[index] = false;
-    if (animationTimeoutIds[index] !== null) {
-      clearTimeout(animationTimeoutIds[index]!);
-      animationTimeoutIds[index] = null;
+    if (animationFrameIds[index] !== null) {
+      cancelAnimationFrame(animationFrameIds[index]!);
+      animationFrameIds[index] = null;
     }
   };
 
-  const startAnimation = (index: number, speed = START_ANIMATION_SPEED) =>
+  const startAnimation = (index: number, speed = startSpeed) =>
     new Promise<void>((resolve) => {
       if (isAnimationActives[index]) {
         resolve();
@@ -153,6 +159,7 @@ const createSmoothToolCalls = (params: {
       const updateToolCall = () => {
         if (!isAnimationActives[index]) {
           resolve();
+          return;
         }
 
         if (outputQueues[index].length > 0) {
@@ -167,15 +174,15 @@ const createSmoothToolCalls = (params: {
             params.onToolCallsUpdate(toolCallsBuffer, [...isAnimationActives]);
           }
 
-          animationTimeoutIds[index] = setTimeout(updateToolCall, 16);
+          animationFrameIds[index] = requestAnimationFrame(() => updateToolCall());
         } else {
           isAnimationActives[index] = false;
-          animationTimeoutIds[index] = null;
+          animationFrameIds[index] = null;
           resolve();
         }
       };
 
-      updateToolCall();
+      animationFrameIds[index] = requestAnimationFrame(() => updateToolCall());
     });
 
   const pushToQueue = (toolCallChunks: MessageToolCallChunk[]) => {
@@ -188,14 +195,14 @@ const createSmoothToolCalls = (params: {
       if (!outputQueues[chunk.index]) {
         outputQueues[chunk.index] = [];
         isAnimationActives[chunk.index] = false;
-        animationTimeoutIds[chunk.index] = null;
+        animationFrameIds[chunk.index] = null;
       }
 
       outputQueues[chunk.index].push(...(chunk.function?.arguments || '').split(''));
     });
   };
 
-  const startAnimations = async (speed = START_ANIMATION_SPEED) => {
+  const startAnimations = async (speed = startSpeed) => {
     const pools = toolCallsBuffer.map(async (_, index) => {
       if (outputQueues[index].length > 0 && !isAnimationActives[index]) {
         await startAnimation(index, speed);
@@ -231,19 +238,26 @@ export const fetchSSE = async (url: string, options: RequestInit & FetchSSEOptio
   let finishedType: SSEFinishType = 'done';
   let response!: Response;
 
-  const { smoothing = true } = options;
+  const { smoothing } = options;
+
+  const textSmoothing = typeof smoothing === 'boolean' ? smoothing : smoothing?.text;
+  const toolsCallingSmoothing =
+    typeof smoothing === 'boolean' ? smoothing : (smoothing?.toolsCalling ?? true);
+  const smoothingSpeed = typeof smoothing === 'object' ? smoothing.speed : undefined;
 
   const textController = createSmoothMessage({
     onTextUpdate: (delta, text) => {
       output = text;
       options.onMessageHandle?.({ text: delta, type: 'text' });
     },
+    startSpeed: smoothingSpeed,
   });
 
   const toolCallsController = createSmoothToolCalls({
     onToolCallsUpdate: (toolCalls, isAnimationActives) => {
       options.onMessageHandle?.({ isAnimationActives, tool_calls: toolCalls, type: 'tool_calls' });
     },
+    startSpeed: smoothingSpeed,
   });
 
   await fetchEventSource(url, {
@@ -306,7 +320,7 @@ export const fetchSSE = async (url: string, options: RequestInit & FetchSSEOptio
         }
 
         case 'text': {
-          if (smoothing) {
+          if (textSmoothing) {
             textController.pushToQueue(data);
 
             if (!textController.isAnimationActive) textController.startAnimation();
@@ -324,7 +338,7 @@ export const fetchSSE = async (url: string, options: RequestInit & FetchSSEOptio
           if (!toolCalls) toolCalls = [];
           toolCalls = parseToolCalls(toolCalls, data);
 
-          if (smoothing) {
+          if (toolsCallingSmoothing) {
             // make the tool calls smooth
 
             // push the tool calls to the smooth queue
@@ -334,10 +348,7 @@ export const fetchSSE = async (url: string, options: RequestInit & FetchSSEOptio
               toolCallsController.startAnimations();
             }
           } else {
-            options.onMessageHandle?.({
-              tool_calls: toolCalls,
-              type: 'tool_calls',
-            });
+            options.onMessageHandle?.({ tool_calls: toolCalls, type: 'tool_calls' });
           }
         }
       }
